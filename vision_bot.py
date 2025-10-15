@@ -1,18 +1,87 @@
-import requests
-import cv2
-import numpy as np
-import tkinter as tk
-from tkinter import filedialog, Label, Button, Text, Frame, Scrollbar, Canvas, messagebox, Checkbutton
-from PIL import Image, ImageTk
+import argparse
+import logging
 import os
-from scipy.stats import entropy
+import shutil
 import subprocess
 import threading
 import time
-import pandas as pd
 from datetime import datetime
-import logging
-import shutil
+
+import tkinter as tk
+from tkinter import (
+    Button,
+    Canvas,
+    Checkbutton,
+    Frame,
+    Label,
+    Scrollbar,
+    Text,
+    filedialog,
+    messagebox,
+)
+
+try:
+    import numpy as np
+except ModuleNotFoundError as exc:  # pragma: no cover - dependência opcional em ambientes de teste
+    np = None
+    _NUMPY_IMPORT_ERROR = exc
+else:
+    _NUMPY_IMPORT_ERROR = None
+
+try:
+    import pandas as pd
+except ModuleNotFoundError as exc:  # pragma: no cover - dependência opcional em ambientes de teste
+    pd = None
+    _PANDAS_IMPORT_ERROR = exc
+else:
+    _PANDAS_IMPORT_ERROR = None
+
+try:
+    import requests
+except ModuleNotFoundError as exc:  # pragma: no cover - dependência opcional em ambientes de teste
+    requests = None
+    _REQUESTS_IMPORT_ERROR = exc
+else:
+    _REQUESTS_IMPORT_ERROR = None
+
+try:
+    from PIL import Image, ImageTk
+except ModuleNotFoundError as exc:  # pragma: no cover - dependência opcional em ambientes de teste
+    Image = ImageTk = None
+    _PIL_IMPORT_ERROR = exc
+else:
+    _PIL_IMPORT_ERROR = None
+
+try:
+    from scipy.stats import entropy
+except ModuleNotFoundError as exc:  # pragma: no cover - dependência opcional em ambientes de teste
+    entropy = None
+    _SCIPY_IMPORT_ERROR = exc
+else:
+    _SCIPY_IMPORT_ERROR = None
+
+
+def _compute_entropy(values):
+    if entropy is not None:
+        return entropy(values)
+    if np is None:
+        raise RuntimeError(
+            "Não é possível calcular entropia sem SciPy ou NumPy disponíveis."
+        )
+    values = np.asarray(values)
+    values = values[values > 0]
+    if values.size == 0:
+        return 0.0
+    probs = values / values.sum()
+    return float(-np.sum(probs * np.log2(probs)))
+
+try:
+    import cv2
+except ModuleNotFoundError as exc:  # pragma: no cover - dependência opcional em ambientes de teste
+    cv2 = None
+    _CV2_IMPORT_ERROR = exc
+else:
+    _CV2_IMPORT_ERROR = None
 
 class ToolTip:
     def __init__(self, widget, text):
@@ -41,6 +110,7 @@ class ToolTip:
 
 class AnaliseAnomaliasGUI:
     def __init__(self, root):
+        self._ensure_runtime_dependencies()
         self.root = root
         self.root.title("Análise de Anomalias em Imagens/Vídeos")
         self.root.state('zoomed')
@@ -185,7 +255,8 @@ class AnaliseAnomaliasGUI:
         Button(self.button_frame, text="Testar Limiares", command=self.toggle_test_mode,
                bg="#FFC107", fg="black", width=12).pack(side=tk.TOP, padx=5, pady=2, fill=tk.X)
 
-    def _resolve_ffmpeg_path(self):
+    @staticmethod
+    def _resolve_ffmpeg_path():
         preferred = ["ffmpeg", "ffmpeg.exe"]
         if os.name == "nt":
             preferred = ["ffmpeg.exe", "ffmpeg"]
@@ -194,6 +265,32 @@ class AnaliseAnomaliasGUI:
             if path:
                 return path
         return preferred[0]
+
+    @staticmethod
+    def _environment_supports_gui():
+        if os.name == "nt":
+            return True
+        display = os.environ.get("DISPLAY")
+        wayland = os.environ.get("WAYLAND_DISPLAY")
+        return bool(display or wayland)
+
+    @staticmethod
+    def _ensure_runtime_dependencies():
+        missing = []
+        if cv2 is None:
+            missing.append("OpenCV (cv2)")
+        if np is None:
+            missing.append("NumPy")
+        if pd is None:
+            missing.append("pandas")
+        if requests is None:
+            missing.append("requests")
+        if Image is None or ImageTk is None:
+            missing.append("Pillow (PIL)")
+        if missing:
+            raise RuntimeError(
+                "Dependências ausentes: " + ", ".join(missing)
+            )
 
     def _terminate_ffmpeg(self):
         if self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
@@ -727,8 +824,7 @@ class AnaliseAnomaliasGUI:
 
             hist = cv2.calcHist([sharpened], [0], None, [256], [0, 256])
             hist = hist / hist.sum()
-            hist = hist[hist > 0]
-            image_entropy = entropy(hist) if len(hist) > 0 else 0
+            image_entropy = _compute_entropy(hist.flatten()) if hist.size > 0 else 0
 
             window_size = 32
             mean_local_std = 0
@@ -844,12 +940,8 @@ class AnaliseAnomaliasGUI:
             hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
             hist_normalized = hist.flatten()
             hist_normalized = hist_normalized / hist_normalized.sum()
-            
-            hist_normalized = hist_normalized[hist_normalized > 0]
-            
-            ent = 0
-            if len(hist_normalized) > 0:
-                ent = entropy(hist_normalized)
+
+            ent = _compute_entropy(hist_normalized) if hist_normalized.size > 0 else 0
             
             metrics = {'Entropia_Histograma': round(ent, 2)}
             
@@ -1087,18 +1179,68 @@ class AnaliseAnomaliasGUI:
         except:
             pass
 
-if __name__ == "__main__":
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Interface de análise de anomalias")
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Executa verificações rápidas sem iniciar a interface gráfica.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.smoke_test:
+        ffmpeg_path = AnaliseAnomaliasGUI._resolve_ffmpeg_path()
+        print(f"FFmpeg detectado em: {ffmpeg_path}")
+        return 0
+
+    missing_deps = []
+    details = []
+    for name, module, error in (
+        ("OpenCV (cv2)", cv2, _CV2_IMPORT_ERROR),
+        ("NumPy", np, _NUMPY_IMPORT_ERROR),
+        ("pandas", pd, _PANDAS_IMPORT_ERROR),
+        ("requests", requests, _REQUESTS_IMPORT_ERROR),
+        ("Pillow (PIL)", Image, _PIL_IMPORT_ERROR),
+    ):
+        if module is None:
+            missing_deps.append(name)
+            if error:
+                details.append(f"{name}: {error}")
+
+    if missing_deps:
+        print(
+            "Dependências ausentes: " + ", ".join(missing_deps) + ". "
+            "Instale-as para executar a interface."
+        )
+        if details:
+            print("Detalhes:")
+            for info in details:
+                print(f"  - {info}")
+        return 1
+
+    if not AnaliseAnomaliasGUI._environment_supports_gui():
+        print(
+            "Ambiente sem suporte gráfico (variável DISPLAY ausente). "
+            "Execute com --smoke-test para uma checagem rápida."
+        )
+        return 1
+
     try:
         root = tk.Tk()
         app = AnaliseAnomaliasGUI(root)
-        
+
         def on_closing():
             app.parar(True)
             root.destroy()
-        
+
         root.protocol("WM_DELETE_WINDOW", on_closing)
-        
         root.mainloop()
+        return 0
     except Exception as e:
         logging.error(f"Erro ao iniciar a GUI: {e}")
         print(f"Erro ao iniciar a GUI: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
