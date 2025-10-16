@@ -1,191 +1,87 @@
-import requests
-import json
-import cv2
-import numpy as np
-import tkinter as tk
-from tkinter import filedialog, Label, Button, Text, Scale, Frame, Scrollbar, Canvas, messagebox, Checkbutton
-from PIL import Image, ImageTk
+import argparse
+import logging
 import os
-from scipy.stats import entropy
+import shutil
 import subprocess
 import threading
 import time
-import pandas as pd
 from datetime import datetime
-import logging
-import urllib.parse
 
-# Função para autenticar e obter chave
+import tkinter as tk
+from tkinter import (
+    Button,
+    Canvas,
+    Checkbutton,
+    Frame,
+    Label,
+    Scrollbar,
+    Text,
+    filedialog,
+    messagebox,
+)
 
-def stream_loop(self):
-    tentativa = 0
-    if self.ffmpeg_proc:
-        self.ffmpeg_proc.kill()
-    while self.running:
-        #self.root.update_idletasks()
-        success = conectar_stream(self)
-        tentativa += 1
-        #if not success:
-            #self.status_var.set("❌ Falha ao conectar. Tentando novamente em 3 segundos...")
-        #else:
-            #self.status_var.set("📡 Conectado ao stream. Exibindo vídeo...")
-        if success:
-            ler_frame(self)
-            if (self.frame is not None):
-                break
-        #time.sleep(1)
-        if tentativa > 1:
-            break
-    self.running = False
-    
-def conectar_stream(self):
-    try:
-        cmd = [
-            "ffmpeg.exe",
-            "-i", self.url_stream,
-            "-f", "mjpeg",
-            "-q:v", "5",
-            "-r", "5",
-            "-"
-        ]
-        self.ffmpeg_proc = subprocess.Popen(cmd, bufsize=10**8, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        #self.ffmpeg_proc = subprocess.Popen(cmd, bufsize=10**8, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return True
-    except Exception as e:
-        self.text_resultados.insert(tk.END, f"\nErro ao iniciar FFmpeg: {str(e)}")        
-        return False
+try:
+    import numpy as np
+except ModuleNotFoundError as exc:  # pragma: no cover - dependência opcional em ambientes de teste
+    np = None
+    _NUMPY_IMPORT_ERROR = exc
+else:
+    _NUMPY_IMPORT_ERROR = None
 
-def ler_frame(self):
-    buffer = b''
+try:
+    import pandas as pd
+except ModuleNotFoundError as exc:  # pragma: no cover - dependência opcional em ambientes de teste
+    pd = None
+    _PANDAS_IMPORT_ERROR = exc
+else:
+    _PANDAS_IMPORT_ERROR = None
 
-    while self.running:
-        try:
-            self.text_resultados.insert(tk.END, f"\nLendo buffer...")
-            chunk = self.ffmpeg_proc.stdout.read(4096)
-            if not chunk:
-                break  # stream cortado → reconectar
-            buffer += chunk
-            start = buffer.find(b'\xff\xd8')
-            end = buffer.find(b'\xff\xd9')
-            if start != -1 and end != -1 and end > start:
-                jpg = buffer[start:end+2]
-                buffer = buffer[end+2:]
-                frame = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+try:
+    import requests
+except ModuleNotFoundError as exc:  # pragma: no cover - dependência opcional em ambientes de teste
+    requests = None
+    _REQUESTS_IMPORT_ERROR = exc
+else:
+    _REQUESTS_IMPORT_ERROR = None
 
-                if frame is not None:
-                    # Exibição em GUI
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    img = ImageTk.PhotoImage(Image.fromarray(rgb))
-                    self.exibir_frame(self.frame)
-                    #self.label.config(image=img)
-                    #self.label.image = img
+try:
+    from PIL import Image, ImageTk
+except ModuleNotFoundError as exc:  # pragma: no cover - dependência opcional em ambientes de teste
+    Image = ImageTk = None
+    _PIL_IMPORT_ERROR = exc
+else:
+    _PIL_IMPORT_ERROR = None
 
-                    # Salvamento com timestamp
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    # filename = os.path.join(self.frames_dir, f"frame_{timestamp}.jpg")
-                    # cv2.imwrite(filename, frame)
-                    self.frame_count += 1
-                    self.frame = frame
-                    break
-        except Exception as e:
-            #self.status_var.set(f"❌ Erro no stream: {e}")
-            break
+try:
+    from scipy.stats import entropy
+except ModuleNotFoundError as exc:  # pragma: no cover - dependência opcional em ambientes de teste
+    entropy = None
+    _SCIPY_IMPORT_ERROR = exc
+else:
+    _SCIPY_IMPORT_ERROR = None
 
-def open_live_video(self, device, canal):
-    try:
-        self.parar(False)
-        self.frame = None
-        
-        #device="0071041041"
-        self.url_stream = url_video_live(self, device, canal)
-        self.running = True
-        self.frame_count = 0
-        #self.status_var.set("🔄 Conectando à URL...")
 
-        #self.thread = threading.Thread(target=stream_loop(self), daemon=True)
-        #self.thread.start()                
-        #while self.running:
-        #    time.sleep(0.7)
-        
-        stream_loop(self)
-        
-        if self.frame is None:
-            self.thread = None
-            self.text_resultados.insert(tk.END, f"Sem frame!")
-            return False
-        
-        #self.exibir_frame(self.frame)
-        self.root.update_idletasks()
-        if self.text_resultados:
-            self.text_resultados.insert(tk.END, f"Frame carregado!:")
-        self.anomaly_frames = []
-        self.last_anomaly_time = {}
-        self.image_path = f"{device}_{canal}.jpb"
-        self.analisar()
-        #self.parar(True)
-        return True
-    except Exception as e:
-        logging.error(f"Erro ao carregar vídeo: {e}")
-        self.text_resultados.insert(tk.END, f"Falha: {str(e)}")
-        return False
-    
-def url_video_live(self, device, canal):
-    try:
-        url_live = f"{self.api_url.rstrip('/')}/api/v1/basic/live/video?key={self.chave}&chl={canal}&audio=0&st=0&port=17891&terid={device}"
-        r = requests.get(url_live)
-        r.raise_for_status()
-        data = r.json()
-        if data.get("errorcode") == 200:
-            url = data["data"]["url"]
-            index = url.find("/live")
-            return f"{self.api_url_live.rstrip('/')}{url[index:]}"
-        else:
-            raise Exception(f"Erro da API: {data.get('errorcode')}")        
-    except Exception as e:
-        raise Exception(f"Erro ao obter URL de video: {str(e)}")
+def _compute_entropy(values):
+    if entropy is not None:
+        return entropy(values)
+    if np is None:
+        raise RuntimeError(
+            "Não é possível calcular entropia sem SciPy ou NumPy disponíveis."
+        )
+    values = np.asarray(values)
+    values = values[values > 0]
+    if values.size == 0:
+        return 0.0
+    probs = values / values.sum()
+    return float(-np.sum(probs * np.log2(probs)))
 
-def dispositivos_online_por_grupo(self):
-    try:
-        url_total = f"{self.api_url.rstrip('/')}/api/v1/basic/devices?key={self.chave}"
-        r_total = requests.get(url_total)
-        r_total.raise_for_status()
-        dispositivos_data = r_total.json()
-        self.dispositivos = dispositivos_data.get("data", [])
-        total_dispositivos = len(self.dispositivos)
-
-        url_online = f"{self.api_url.rstrip('/')}/api/v1/basic/state/now"
-        payload = {"key": self.chave, "terid": []}
-        r_online = requests.post(url_online, json=payload)
-        r_online.raise_for_status()
-        online_data = r_online.json()
-        self.online_terids = set([d["terid"] for d in online_data.get("data", [])])
-
-        grupos = {}
-        for d in self.dispositivos:
-            if d["terid"] in self.online_terids:
-                nome_grupo = d.get("groupname", "(Sem Grupo)")
-                canais = d.get("channelcount", 0)
-                linha = f"{d['terid']} - {d.get('carlicence', '(sem placa)')} - {canais} canais"
-                grupos.setdefault(nome_grupo, []).append(linha)
-
-        total_online = sum(len(lista) for lista in grupos.values())
-        return grupos, total_online, total_dispositivos
-
-    except Exception as e:
-        raise Exception(f"Erro ao agrupar dispositivos por grupo: {str(e)}")
-
-def autenticar_streamax(api_url, usuario, senha):
-    try:
-        url = f"{api_url.rstrip('/')}/api/v1/basic/key?username={usuario}&password={senha}"
-        r = requests.get(url)
-        r.raise_for_status()
-        data = r.json()
-        if data.get("errorcode") == 200:
-            return data["data"]["key"]
-        else:
-            raise Exception(f"Erro da API: {data.get('errorcode')}")
-    except Exception as e:
-        raise Exception(f"Falha na autenticação: {str(e)}")
+try:
+    import cv2
+except ModuleNotFoundError as exc:  # pragma: no cover - dependência opcional em ambientes de teste
+    cv2 = None
+    _CV2_IMPORT_ERROR = exc
+else:
+    _CV2_IMPORT_ERROR = None
 
 class ToolTip:
     def __init__(self, widget, text):
@@ -214,6 +110,7 @@ class ToolTip:
 
 class AnaliseAnomaliasGUI:
     def __init__(self, root):
+        self._ensure_runtime_dependencies()
         self.root = root
         self.root.title("Análise de Anomalias em Imagens/Vídeos")
         self.root.state('zoomed')
@@ -276,6 +173,7 @@ class AnaliseAnomaliasGUI:
         self.running = False
         self.inLoop = False
         self.ffmpeg_proc = None
+        self.ffmpeg_path = self._resolve_ffmpeg_path()
         self.frame_count = 0
         self.max_saved_frames = 1
         self.frames_dir = "./frames_capturados"
@@ -350,12 +248,222 @@ class AnaliseAnomaliasGUI:
                bg="#4CAF50", fg="white", width=12).pack(side=tk.TOP, padx=5, pady=2, fill=tk.X)
         Button(self.button_frame, text='Spam?', textvariable=self.textBtnLiveServer, command=self.command_cargaServer, 
                bg="#3A694F", fg="white", width=12).pack(side=tk.TOP, padx=5, pady=2, fill=tk.X)
-        Button(self.button_frame, text="Analisar", command=self.analisar, 
+        Button(self.button_frame, text="Analisar", command=self.analisar,
                bg="#2196F3", fg="white", width=12).pack(side=tk.TOP, padx=5, pady=2, fill=tk.X)
-        Button(self.button_frame, text="Parar", command=self.parar(True), 
+        Button(self.button_frame, text="Parar", command=lambda: self.parar(True),
                bg="#F44336", fg="white", width=12).pack(side=tk.TOP, padx=5, pady=2, fill=tk.X)
-        Button(self.button_frame, text="Testar Limiares", command=self.toggle_test_mode, 
+        Button(self.button_frame, text="Testar Limiares", command=self.toggle_test_mode,
                bg="#FFC107", fg="black", width=12).pack(side=tk.TOP, padx=5, pady=2, fill=tk.X)
+
+    @staticmethod
+    def _resolve_ffmpeg_path():
+        preferred = ["ffmpeg", "ffmpeg.exe"]
+        if os.name == "nt":
+            preferred = ["ffmpeg.exe", "ffmpeg"]
+        for candidate in preferred:
+            path = shutil.which(candidate)
+            if path:
+                return path
+        return preferred[0]
+
+    @staticmethod
+    def _environment_supports_gui():
+        if os.name == "nt":
+            return True
+        display = os.environ.get("DISPLAY")
+        wayland = os.environ.get("WAYLAND_DISPLAY")
+        return bool(display or wayland)
+
+    @staticmethod
+    def _ensure_runtime_dependencies():
+        missing = []
+        if cv2 is None:
+            missing.append("OpenCV (cv2)")
+        if np is None:
+            missing.append("NumPy")
+        if pd is None:
+            missing.append("pandas")
+        if requests is None:
+            missing.append("requests")
+        if Image is None or ImageTk is None:
+            missing.append("Pillow (PIL)")
+        if missing:
+            raise RuntimeError(
+                "Dependências ausentes: " + ", ".join(missing)
+            )
+
+    def _terminate_ffmpeg(self):
+        if self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
+            try:
+                self.ffmpeg_proc.kill()
+            except Exception:
+                pass
+        self.ffmpeg_proc = None
+
+    def _append_result(self, message):
+        if self.text_resultados:
+            self.text_resultados.insert(tk.END, message)
+            self.text_resultados.see(tk.END)
+
+    def _connect_stream(self):
+        if not self.url_stream:
+            return False
+        try:
+            cmd = [
+                self.ffmpeg_path,
+                "-i", self.url_stream,
+                "-f", "mjpeg",
+                "-q:v", "5",
+                "-r", "5",
+                "-"
+            ]
+            self.ffmpeg_proc = subprocess.Popen(
+                cmd,
+                bufsize=10 ** 8,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL
+            )
+            return True
+        except FileNotFoundError:
+            self._append_result("\nErro: FFmpeg não encontrado. Verifique a instalação.")
+            return False
+        except Exception as exc:
+            logging.error("Erro ao iniciar FFmpeg", exc_info=True)
+            self._append_result(f"\nErro ao iniciar FFmpeg: {exc}")
+            return False
+
+    def _read_stream_frame(self):
+        if not self.ffmpeg_proc or not self.ffmpeg_proc.stdout:
+            return
+
+        buffer = b""
+        while self.running:
+            try:
+                chunk = self.ffmpeg_proc.stdout.read(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                start = buffer.find(b"\xff\xd8")
+                end = buffer.find(b"\xff\xd9")
+                if start != -1 and end != -1 and end > start:
+                    jpg = buffer[start:end + 2]
+                    buffer = buffer[end + 2:]
+                    frame = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        self.frame_count += 1
+                        self.frame = frame
+                        self.exibir_frame(frame)
+                        return
+            except Exception as exc:
+                logging.error("Erro ao ler frame do stream", exc_info=True)
+                self._append_result(f"\nErro na leitura do stream: {exc}")
+                break
+
+    def stream_loop(self):
+        tentativa = 0
+        self._terminate_ffmpeg()
+        while self.running:
+            tentativa += 1
+            if not self._connect_stream():
+                if tentativa > 1:
+                    break
+                time.sleep(1)
+                continue
+            self._read_stream_frame()
+            if self.frame is not None:
+                break
+            if tentativa > 1:
+                break
+        self.running = False
+        self._terminate_ffmpeg()
+
+    def open_live_video(self, device, canal):
+        try:
+            self.parar(False)
+            self.frame = None
+            self.url_stream = self._build_live_stream_url(device, canal)
+            self.running = True
+            self.frame_count = 0
+            self.stream_loop()
+
+            if self.frame is None:
+                self._append_result("\nSem frame!")
+                return False
+
+            self.root.update_idletasks()
+            self._append_result("\nFrame carregado!")
+            self.anomaly_frames = []
+            self.last_anomaly_time = {}
+            self.image_path = f"{device}_{canal}.jpg"
+            self.analisar()
+            return True
+        except Exception as exc:
+            logging.error("Erro ao carregar vídeo", exc_info=True)
+            self._append_result(f"\nFalha ao carregar vídeo: {exc}")
+            return False
+        finally:
+            self.running = False
+            self._terminate_ffmpeg()
+
+    def _build_live_stream_url(self, device, canal):
+        try:
+            url_live = (
+                f"{self.api_url.rstrip('/')}/api/v1/basic/live/video"
+                f"?key={self.chave}&chl={canal}&audio=0&st=0&port=17891&terid={device}"
+            )
+            response = requests.get(url_live)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("errorcode") == 200:
+                url = data["data"]["url"]
+                index = url.find("/live")
+                return f"{self.api_url_live.rstrip('/')}{url[index:]}"
+            raise RuntimeError(f"Erro da API: {data.get('errorcode')}")
+        except Exception as exc:
+            raise RuntimeError(f"Erro ao obter URL de vídeo: {exc}") from exc
+
+    def _fetch_devices_by_group(self):
+        try:
+            url_total = f"{self.api_url.rstrip('/')}/api/v1/basic/devices?key={self.chave}"
+            r_total = requests.get(url_total)
+            r_total.raise_for_status()
+            dispositivos_data = r_total.json()
+            self.dispositivos = dispositivos_data.get("data", [])
+            total_dispositivos = len(self.dispositivos)
+
+            url_online = f"{self.api_url.rstrip('/')}/api/v1/basic/state/now"
+            payload = {"key": self.chave, "terid": []}
+            r_online = requests.post(url_online, json=payload)
+            r_online.raise_for_status()
+            online_data = r_online.json()
+            self.online_terids = {d["terid"] for d in online_data.get("data", [])}
+
+            grupos = {}
+            for dispositivo in self.dispositivos:
+                if dispositivo["terid"] in self.online_terids:
+                    nome_grupo = dispositivo.get("groupname", "(Sem Grupo)")
+                    canais = dispositivo.get("channelcount", 0)
+                    linha = (
+                        f"{dispositivo['terid']} - {dispositivo.get('carlicence', '(sem placa)')} - {canais} canais"
+                    )
+                    grupos.setdefault(nome_grupo, []).append(linha)
+
+            total_online = sum(len(lista) for lista in grupos.values())
+            return grupos, total_online, total_dispositivos
+        except Exception as exc:
+            raise RuntimeError(f"Erro ao agrupar dispositivos por grupo: {exc}") from exc
+
+    def _authenticate_streamax(self, api_url, usuario, senha):
+        try:
+            url = f"{api_url.rstrip('/')}/api/v1/basic/key?username={usuario}&password={senha}"
+            response = requests.get(url)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("errorcode") == 200:
+                return data["data"]["key"]
+            raise RuntimeError(f"Erro da API: {data.get('errorcode')}")
+        except Exception as exc:
+            raise RuntimeError(f"Falha na autenticação: {exc}") from exc
 
     def create_threshold_controls(self):
         controls = [
@@ -481,59 +589,54 @@ class AnaliseAnomaliasGUI:
             self.thread_cargaServer()
             
     def carregar_server(self):
-        self.online_terids= []
+        self.online_terids = []
         try:
             if self.text_resultados:
                 self.text_resultados.delete(1.0, tk.END)
-            self.text_resultados.insert(tk.END, f"Conectando servidor...\n")
-            self.chave = autenticar_streamax(self.api_url, self.usuario, self.senha)
+            self._append_result("Conectando servidor...\n")
+            self.chave = self._authenticate_streamax(self.api_url, self.usuario, self.senha)
             if not self.chave:
-                self.text_resultados.insert(tk.END, f"Falha na conexão\n")
-            else:
-                self.text_resultados.insert(tk.END, f"Obtendo lista de devices...\n")
-                grupos, total_online, total_dispositivos = dispositivos_online_por_grupo(self)
+                self._append_result("Falha na conexão\n")
+                return
 
-                self.text_resultados.insert(tk.END, f"Total de dispositivos: {total_dispositivos}\n")
-                self.text_resultados.insert(tk.END, f"Total online: {total_online}\n")
+            self._append_result("Obtendo lista de devices...\n")
+            grupos, total_online, total_dispositivos = self._fetch_devices_by_group()
 
-                Ok = False
-                if not grupos:
-                    self.text_resultados.insert(tk.END, "Nenhum dispositivo online encontrado!\n")
-                else:
-                    self.textBtnLiveServer.set("Interromper Live")
-                    camera_atual = 0
-                    self.inLoop = True
-                    for d in self.dispositivos:
+            self._append_result(f"Total de dispositivos: {total_dispositivos}\n")
+            self._append_result(f"Total online: {total_online}\n")
+
+            if not grupos:
+                self._append_result("Nenhum dispositivo online encontrado!\n")
+                return
+
+            self.textBtnLiveServer.set("Interromper Live")
+            camera_atual = 0
+            self.inLoop = True
+            for dispositivo in self.dispositivos:
+                if not self.inLoop:
+                    self._append_result("Interrompido.")
+                    break
+                if dispositivo["terid"] in self.online_terids:
+                    canais = dispositivo.get("channelcount", 0)
+                    terid = dispositivo['terid']
+                    carlicence = dispositivo['carlicence']
+                    camera_atual += 1
+                    perce = round(camera_atual / len(self.online_terids) * 100, 0)
+                    for canal in range(1, canais):
                         if not self.inLoop:
-                            self.text_resultados.insert(tk.END, "Interrompido.")
+                            self._append_result("Interrompido.")
                             break
-                        if d["terid"] in self.online_terids:
-                            canais = d.get("channelcount", 0)
-                            terid=d['terid']
-                            carlicence=d['carlicence']
-                            camera_atual += 1
-                            perce = round(camera_atual / len(self.online_terids) * 100, 0)
-                        #perce = round(camera_atual / len(self.dispositivos) * 100, 0)
-                            for c in range(1, canais):
-                                if not self.inLoop:
-                                    self.text_resultados.insert(tk.END, "Interrompido.")
-                                    break
-                                #c=1
-                                self.image_path = None
-                                self.text_resultados.insert(tk.END, f"\n{carlicence} / {c}...")
-                                self.text_resultados.see(str(len(self.text_resultados.get("1.0", tk.END)))+".0")
-                                self.root.title(f"Procurando Câmeras...{int(perce)}%")
-                            # if camera_atual % 2 == 0: 
-                                self.root.update()
-                                Ok = open_live_video(self, terid, c)
-                            #if Ok:
-                                #break
-                        else:
-                            self.root.update_idletasks()
-                self.inLoop = False
-                self.textBtnLiveServer.set("Carregar Live Servidor")
-                self.root.title("Análise de Anomalias em Imagens/Vídeos")
-            
+                        self.image_path = None
+                        self._append_result(f"\n{carlicence} / {canal}...")
+                        self.root.title(f"Procurando Câmeras...{int(perce)}%")
+                        self.root.update()
+                        self.open_live_video(terid, canal)
+                else:
+                    self.root.update_idletasks()
+            self.inLoop = False
+            self.textBtnLiveServer.set("Carregar Live Servidor")
+            self.root.title("Análise de Anomalias em Imagens/Vídeos")
+
         except Exception as e:
             logging.error(f"Erro ao carregar servidor: {e}")
             messagebox.showerror("Erro", f"Erro ao carregar servidor: {str(e)}")
@@ -721,8 +824,7 @@ class AnaliseAnomaliasGUI:
 
             hist = cv2.calcHist([sharpened], [0], None, [256], [0, 256])
             hist = hist / hist.sum()
-            hist = hist[hist > 0]
-            image_entropy = entropy(hist) if len(hist) > 0 else 0
+            image_entropy = _compute_entropy(hist.flatten()) if hist.size > 0 else 0
 
             window_size = 32
             mean_local_std = 0
@@ -838,12 +940,8 @@ class AnaliseAnomaliasGUI:
             hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
             hist_normalized = hist.flatten()
             hist_normalized = hist_normalized / hist_normalized.sum()
-            
-            hist_normalized = hist_normalized[hist_normalized > 0]
-            
-            ent = 0
-            if len(hist_normalized) > 0:
-                ent = entropy(hist_normalized)
+
+            ent = _compute_entropy(hist_normalized) if hist_normalized.size > 0 else 0
             
             metrics = {'Entropia_Histograma': round(ent, 2)}
             
@@ -1081,18 +1179,68 @@ class AnaliseAnomaliasGUI:
         except:
             pass
 
-if __name__ == "__main__":
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Interface de análise de anomalias")
+    parser.add_argument(
+        "--smoke-test",
+        action="store_true",
+        help="Executa verificações rápidas sem iniciar a interface gráfica.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.smoke_test:
+        ffmpeg_path = AnaliseAnomaliasGUI._resolve_ffmpeg_path()
+        print(f"FFmpeg detectado em: {ffmpeg_path}")
+        return 0
+
+    missing_deps = []
+    details = []
+    for name, module, error in (
+        ("OpenCV (cv2)", cv2, _CV2_IMPORT_ERROR),
+        ("NumPy", np, _NUMPY_IMPORT_ERROR),
+        ("pandas", pd, _PANDAS_IMPORT_ERROR),
+        ("requests", requests, _REQUESTS_IMPORT_ERROR),
+        ("Pillow (PIL)", Image, _PIL_IMPORT_ERROR),
+    ):
+        if module is None:
+            missing_deps.append(name)
+            if error:
+                details.append(f"{name}: {error}")
+
+    if missing_deps:
+        print(
+            "Dependências ausentes: " + ", ".join(missing_deps) + ". "
+            "Instale-as para executar a interface."
+        )
+        if details:
+            print("Detalhes:")
+            for info in details:
+                print(f"  - {info}")
+        return 1
+
+    if not AnaliseAnomaliasGUI._environment_supports_gui():
+        print(
+            "Ambiente sem suporte gráfico (variável DISPLAY ausente). "
+            "Execute com --smoke-test para uma checagem rápida."
+        )
+        return 1
+
     try:
         root = tk.Tk()
         app = AnaliseAnomaliasGUI(root)
-        
+
         def on_closing():
             app.parar(True)
             root.destroy()
-        
+
         root.protocol("WM_DELETE_WINDOW", on_closing)
-        
         root.mainloop()
+        return 0
     except Exception as e:
         logging.error(f"Erro ao iniciar a GUI: {e}")
         print(f"Erro ao iniciar a GUI: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
