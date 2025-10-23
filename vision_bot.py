@@ -1,19 +1,32 @@
-import requests
+import base64
 import json
-import cv2
-import numpy as np
-import tkinter as tk
-from tkinter import filedialog, Label, Button, Text, Scale, Frame, Scrollbar, Canvas, messagebox, Checkbutton
-from PIL import Image, ImageTk
+import logging
 import os
-from scipy.stats import entropy
 import subprocess
 import threading
 import time
-import pandas as pd
-from datetime import datetime
-import logging
 import urllib.parse
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+import cv2
+import numpy as np
+import pandas as pd
+import requests
+import tkinter as tk
+from PIL import Image, ImageTk
+from scipy.stats import entropy
+from tkinter import (
+    Button,
+    Canvas,
+    Checkbutton,
+    Frame,
+    Label,
+    Scrollbar,
+    Text,
+    filedialog,
+    messagebox,
+)
 
 # Função para autenticar e obter chave
 
@@ -21,6 +34,7 @@ def stream_loop(self):
     tentativa = 0
     if self.ffmpeg_proc:
         self.ffmpeg_proc.kill()
+        self.ffmpeg_proc = None
     while self.running:
         #self.root.update_idletasks()
         success = conectar_stream(self)
@@ -56,11 +70,12 @@ def conectar_stream(self):
         return False
 
 def ler_frame(self):
-    buffer = b''
+    buffer = b""
 
     while self.running:
         try:
-            self.text_resultados.insert(tk.END, f"\nLendo buffer...")
+            if self.text_resultados:
+                self.text_resultados.insert(tk.END, "\nLendo buffer...")
             chunk = self.ffmpeg_proc.stdout.read(4096)
             if not chunk:
                 break  # stream cortado → reconectar
@@ -74,9 +89,7 @@ def ler_frame(self):
 
                 if frame is not None:
                     # Exibição em GUI
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    img = ImageTk.PhotoImage(Image.fromarray(rgb))
-                    self.exibir_frame(self.frame)
+                    self.exibir_frame(frame)
                     #self.label.config(image=img)
                     #self.label.image = img
 
@@ -140,7 +153,10 @@ def url_video_live(self, device, canal):
             index = url.find("/live")
             return f"{self.api_url_live.rstrip('/')}{url[index:]}"
         else:
-            raise Exception(f"Erro da API: {data.get('errorcode')}")        
+            message = data.get("message") or data.get("msg") or data.get("errormsg")
+            raise Exception(
+                f"Erro da API: código {data.get('errorcode')} - {message or 'sem detalhes fornecidos'}"
+            )
     except Exception as e:
         raise Exception(f"Erro ao obter URL de video: {str(e)}")
 
@@ -186,6 +202,111 @@ def autenticar_streamax(api_url, usuario, senha):
             raise Exception(f"Erro da API: {data.get('errorcode')}")
     except Exception as e:
         raise Exception(f"Falha na autenticação: {str(e)}")
+
+
+class GPTAnomalyDetector:
+    """Wrapper responsável por enviar frames para a API do GPT e extrair anomalias."""
+
+    def __init__(self, model: Optional[str] = None, timeout: int = 45):
+        self.model = model or os.getenv("VISIONBOT_GPT_MODEL", "gpt-4o-mini")
+        self.timeout = timeout
+        self.endpoint = os.getenv(
+            "VISIONBOT_GPT_ENDPOINT", "https://api.openai.com/v1/chat/completions"
+        )
+
+    def is_configured(self) -> bool:
+        return bool(os.getenv("OPENAI_API_KEY"))
+
+    def _prepare_payload(self, frame: np.ndarray) -> Dict[str, Any]:
+        success, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        if not success:
+            raise ValueError("Falha ao converter frame para JPEG para análise GPT.")
+        encoded_image = base64.b64encode(buffer).decode("utf-8")
+
+        system_prompt = (
+            "Você é um assistente especializado em monitoramento por vídeo. "
+            "Analise a imagem enviada e descreva anomalias relevantes como câmeras obstruídas, "
+            "falta de iluminação, presença de pessoas em áreas restritas, acidentes ou qualquer "
+            "situação incomum. Se não houver anomalias, devolva uma lista vazia."
+        )
+
+        return {
+            "model": self.model,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "anomaly_detection",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "anomalies": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "confidence": {
+                                            "type": "number",
+                                            "minimum": 0,
+                                            "maximum": 1,
+                                        },
+                                    },
+                                    "required": ["label", "description"],
+                                },
+                            }
+                        },
+                        "required": ["anomalies"],
+                    },
+                },
+            },
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Analise a imagem e informe as anomalias detectadas em português.",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{encoded_image}",
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+
+    def analyze(self, frame: np.ndarray) -> List[Dict[str, Any]]:
+        if not self.is_configured():
+            raise EnvironmentError(
+                "Variável de ambiente OPENAI_API_KEY não configurada para uso da API GPT."
+            )
+
+        payload = self._prepare_payload(frame)
+        headers = {
+            "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
+            "Content-Type": "application/json",
+        }
+
+        response = requests.post(
+            self.endpoint, headers=headers, json=payload, timeout=self.timeout
+        )
+        response.raise_for_status()
+
+        try:
+            content = response.json()["choices"][0]["message"]["content"]
+            parsed = json.loads(content)
+            anomalies = parsed.get("anomalies", [])
+            if not isinstance(anomalies, list):
+                anomalies = []
+        except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Resposta inválida da API GPT: {exc}") from exc
+
+        return anomalies
 
 class ToolTip:
     def __init__(self, widget, text):
@@ -247,6 +368,7 @@ class AnaliseAnomaliasGUI:
         self.analyze_colors = tk.BooleanVar(value=True)
         self.analyze_objects = tk.BooleanVar(value=True)
         self.analyze_brightness = tk.BooleanVar(value=True)
+        self.analyze_gpt = tk.BooleanVar(value=True)
 
         self.last_anomaly_time = {}
         self.anomaly_frames = []
@@ -254,6 +376,8 @@ class AnaliseAnomaliasGUI:
 
         self.output_folder = "anomalias_frames"
         os.makedirs(self.output_folder, exist_ok=True)
+
+        self.gpt_detector = GPTAnomalyDetector()
 
         try:
             self.setup_ui()
@@ -329,6 +453,9 @@ class AnaliseAnomaliasGUI:
         self.selection_frame3.pack(fill=tk.X, pady=1)
         Checkbutton(self.selection_frame3, text="Alinhamento", variable=self.analyze_alignment, bg="#f0f0f0").pack(anchor='e', side=tk.LEFT)
         Checkbutton(self.selection_frame3, text="Brilho", variable=self.analyze_brightness, bg="#f0f0f0").pack(anchor='w', side=tk.RIGHT)
+        self.selection_frame4 = Frame(self.scrollable_frame, bg="#f0f0f0")
+        self.selection_frame4.pack(fill=tk.X, pady=1)
+        Checkbutton(self.selection_frame4, text="Detecção GPT", variable=self.analyze_gpt, bg="#f0f0f0").pack(anchor='center')
         self.create_threshold_controls()
 
         results_frame = Frame(self.control_frame, bg="#f0f0f0")
@@ -352,7 +479,7 @@ class AnaliseAnomaliasGUI:
                bg="#3A694F", fg="white", width=12).pack(side=tk.TOP, padx=5, pady=2, fill=tk.X)
         Button(self.button_frame, text="Analisar", command=self.analisar, 
                bg="#2196F3", fg="white", width=12).pack(side=tk.TOP, padx=5, pady=2, fill=tk.X)
-        Button(self.button_frame, text="Parar", command=self.parar(True), 
+        Button(self.button_frame, text="Parar", command=lambda: self.parar(True),
                bg="#F44336", fg="white", width=12).pack(side=tk.TOP, padx=5, pady=2, fill=tk.X)
         Button(self.button_frame, text="Testar Limiares", command=self.toggle_test_mode, 
                bg="#FFC107", fg="black", width=12).pack(side=tk.TOP, padx=5, pady=2, fill=tk.X)
@@ -861,19 +988,89 @@ class AnaliseAnomaliasGUI:
         try:
             if not self.analyze_brightness.get():
                 return frame, [], {}
-            
+
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             brilho_medio = np.mean(gray)
             metrics = {'Brilho_Médio': round(brilho_medio, 2)}
-            
+
             if brilho_medio < self.brightness_threshold.get():
-                cv2.putText(frame, "Imagem Escura", (10, 150), 
+                cv2.putText(frame, "Imagem Escura", (10, 150),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
                 return frame, ["Imagem excessivamente escura"], metrics
             return frame, [], metrics
         except Exception as e:
             logging.error(f"Erro na análise de brilho: {e}")
             return frame, [], {}
+
+    def analisar_com_gpt(self, frame):
+        """Executa a análise de anomalias por meio da API GPT."""
+        if not self.analyze_gpt.get():
+            return frame, [], {}
+
+        overlay_y = 180
+        overlay_step = 25
+        metrics: Dict[str, Any] = {
+            "Fonte_Deteccao": "GPT",
+            "Modelo_GPT": self.gpt_detector.model,
+        }
+
+        try:
+            anomalies = self.gpt_detector.analyze(frame)
+        except EnvironmentError as env_err:
+            if self.text_resultados:
+                self.text_resultados.insert(
+                    tk.END,
+                    f"\n[GPT] Configuração ausente: {env_err}\n",
+                )
+            return frame, [], {}
+        except requests.RequestException as req_err:
+            logging.error(f"Erro de requisição à API GPT: {req_err}")
+            if self.text_resultados:
+                self.text_resultados.insert(
+                    tk.END,
+                    f"\n[GPT] Falha na comunicação com a API: {req_err}\n",
+                )
+            return frame, [], {}
+        except Exception as exc:
+            logging.error(f"Erro inesperado na análise GPT: {exc}")
+            if self.text_resultados:
+                self.text_resultados.insert(
+                    tk.END,
+                    f"\n[GPT] Erro ao interpretar a resposta: {exc}\n",
+                )
+            return frame, [], {}
+
+        if not anomalies:
+            return frame, [], {}
+
+        detected = []
+        metrics["Total_Anomalias_GPT"] = len(anomalies)
+        for anomaly in anomalies:
+            label = anomaly.get("label", "Anomalia")
+            description = anomaly.get("description", label)
+            confidence = anomaly.get("confidence")
+            detected.append(f"GPT: {description}")
+
+            if confidence is not None:
+                metrics[f"Confianca_{label}"] = round(float(confidence), 3)
+
+            overlay_text = description
+            if confidence is not None:
+                overlay_text = f"{description} ({confidence:.0%})"
+
+            cv2.putText(
+                frame,
+                overlay_text[:80],
+                (10, overlay_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 165, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            overlay_y += overlay_step
+
+        return frame, detected, metrics
 
     def analisar(self):
         if self.frame is None and self.cap is None:
@@ -904,38 +1101,43 @@ class AnaliseAnomaliasGUI:
             if self.analyze_edges.get():
                 frame, bordas_anomalias, bordas_metrics = self.analisar_bordas(frame)
                 for anomalia in bordas_anomalias:
-                    self.save_anomaly_frame(frame, anomalia, metrics=bordas_metrics)
+                    self.save_anomaly_frame(frame, anomalia, metrics=bordas_metrics.copy())
                 anomalias.extend(bordas_anomalias)
 
             if self.analyze_blur.get():
                 frame, embacamento_anomalias, embacamento_metrics = self.analisar_embacamento(frame)
                 for anomalia in embacamento_anomalias:
-                    self.save_anomaly_frame(frame, anomalia, metrics=embacamento_metrics)
+                    self.save_anomaly_frame(frame, anomalia, metrics=embacamento_metrics.copy())
                 anomalias.extend(embacamento_anomalias)
 
             if self.analyze_alignment.get():
                 frame, alinhamento_anomalias, alinhamento_metrics = self.analisar_alinhamento(frame)
                 for anomalia in alinhamento_anomalias:
-                    self.save_anomaly_frame(frame, anomalia, metrics=alinhamento_metrics)
+                    self.save_anomaly_frame(frame, anomalia, metrics=alinhamento_metrics.copy())
                 anomalias.extend(alinhamento_anomalias)
 
             if self.analyze_colors.get():
                 frame, cores_anomalias, cores_metrics = self.analisar_cores_solidas(frame)
                 for anomalia in cores_anomalias:
-                    self.save_anomaly_frame(frame, anomalia, metrics=cores_metrics)
+                    self.save_anomaly_frame(frame, anomalia, metrics=cores_metrics.copy())
                 anomalias.extend(cores_anomalias)
 
             if self.analyze_objects.get():
                 frame, objetos_anomalias, objetos_metrics = self.analisar_sem_objetos(frame)
                 for anomalia in objetos_anomalias:
-                    self.save_anomaly_frame(frame, anomalia, metrics=objetos_metrics)
+                    self.save_anomaly_frame(frame, anomalia, metrics=objetos_metrics.copy())
                 anomalias.extend(objetos_anomalias)
 
             if self.analyze_brightness.get():
                 frame, brilho_anomalias, brilho_metrics = self.analisar_brilho(frame)
                 for anomalia in brilho_anomalias:
-                    self.save_anomaly_frame(frame, anomalia, metrics=brilho_metrics)
+                    self.save_anomaly_frame(frame, anomalia, metrics=brilho_metrics.copy())
                 anomalias.extend(brilho_anomalias)
+
+            frame, gpt_anomalias, gpt_metrics = self.analisar_com_gpt(frame)
+            for anomalia in gpt_anomalias:
+                self.save_anomaly_frame(frame, anomalia, metrics=gpt_metrics.copy())
+            anomalias.extend(gpt_anomalias)
 
             self.exibir_frame(frame)
 
@@ -986,38 +1188,78 @@ class AnaliseAnomaliasGUI:
                 if self.analyze_edges.get():
                     frame, bordas_anomalias, bordas_metrics = self.analisar_bordas(frame)
                     for anomalia in bordas_anomalias:
-                        self.save_anomaly_frame(frame, anomalia, frame_index, bordas_metrics)
+                        self.save_anomaly_frame(
+                            frame,
+                            anomalia,
+                            frame_index,
+                            bordas_metrics.copy(),
+                        )
                     anomalias.extend(bordas_anomalias)
 
                 if self.analyze_blur.get():
                     frame, embacamento_anomalias, embacamento_metrics = self.analisar_embacamento(frame)
                     for anomalia in embacamento_anomalias:
-                        self.save_anomaly_frame(frame, anomalia, frame_index, embacamento_metrics)
+                        self.save_anomaly_frame(
+                            frame,
+                            anomalia,
+                            frame_index,
+                            embacamento_metrics.copy(),
+                        )
                     anomalias.extend(embacamento_anomalias)
 
                 if self.analyze_alignment.get():
                     frame, alinhamento_anomalias, alinhamento_metrics = self.analisar_alinhamento(frame)
                     for anomalia in alinhamento_anomalias:
-                        self.save_anomaly_frame(frame, anomalia, frame_index, alinhamento_metrics)
+                        self.save_anomaly_frame(
+                            frame,
+                            anomalia,
+                            frame_index,
+                            alinhamento_metrics.copy(),
+                        )
                     anomalias.extend(alinhamento_anomalias)
 
                 if self.analyze_colors.get():
                     frame, cores_anomalias, cores_metrics = self.analisar_cores_solidas(frame)
                     for anomalia in cores_anomalias:
-                        self.save_anomaly_frame(frame, anomalia, frame_index, cores_metrics)
+                        self.save_anomaly_frame(
+                            frame,
+                            anomalia,
+                            frame_index,
+                            cores_metrics.copy(),
+                        )
                     anomalias.extend(cores_anomalias)
 
                 if self.analyze_objects.get():
                     frame, objetos_anomalias, objetos_metrics = self.analisar_sem_objetos(frame)
                     for anomalia in objetos_anomalias:
-                        self.save_anomaly_frame(frame, anomalia, frame_index, objetos_metrics)
+                        self.save_anomaly_frame(
+                            frame,
+                            anomalia,
+                            frame_index,
+                            objetos_metrics.copy(),
+                        )
                     anomalias.extend(objetos_anomalias)
 
                 if self.analyze_brightness.get():
                     frame, brilho_anomalias, brilho_metrics = self.analisar_brilho(frame)
                     for anomalia in brilho_anomalias:
-                        self.save_anomaly_frame(frame, anomalia, frame_index, brilho_metrics)
+                        self.save_anomaly_frame(
+                            frame,
+                            anomalia,
+                            frame_index,
+                            brilho_metrics.copy(),
+                        )
                     anomalias.extend(brilho_anomalias)
+
+                frame, gpt_anomalias, gpt_metrics = self.analisar_com_gpt(frame)
+                for anomalia in gpt_anomalias:
+                    self.save_anomaly_frame(
+                        frame,
+                        anomalia,
+                        frame_index,
+                        gpt_metrics.copy(),
+                    )
+                anomalias.extend(gpt_anomalias)
 
                 self.root.after(0, lambda f=frame, a=anomalias, fc=frame_index: self.atualizar_gui_video(f, a, fc))
                 
@@ -1053,14 +1295,23 @@ class AnaliseAnomaliasGUI:
         self.stop_flag = True
         self.is_analyzing = False
         self.test_mode = False
-        
+        self.running = False
+        self.inLoop = False
+
         if self.cap is not None:
             self.cap.release()
             self.cap = None
-        
+
         if self.video_thread and self.video_thread.is_alive():
             self.video_thread.join(timeout=1.0)
-        
+
+        if self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
+            try:
+                self.ffmpeg_proc.kill()
+            except Exception:
+                pass
+        self.ffmpeg_proc = None
+
         self.frame = None
         if show_text:
             if self.text_resultados:
